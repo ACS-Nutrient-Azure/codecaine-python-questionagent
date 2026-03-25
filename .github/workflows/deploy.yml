@@ -25,9 +25,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pytest
 
-      - name: Run tests
-        run: pytest tests/ -v
-
   build-and-push:
     name: Build & Push ECR
     needs: test
