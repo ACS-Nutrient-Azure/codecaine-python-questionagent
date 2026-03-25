@@ -12,7 +12,7 @@ FROM --platform=linux/arm64 python:3.12-slim
 
 WORKDIR /app
 COPY --from=builder /root/.local /root/.local
-COPY app/ ./app/
+# COPY app/ ./app/
 # COPY lpi_vector_db/ ./lpi_vector_db/
 
 ENV PATH=/root/.local/bin:$PATH
