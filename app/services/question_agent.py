@@ -135,7 +135,7 @@ class QuestionAgent:
                 conversations = self.memory_client.list_events(
                     memory_id=settings.MEMORY_ID,
                     actor_id=req.cognito_id,
-                    session_id=req.chat_result_id,
+                    session_id=str(req.chat_result_id),
                     max_results=10
                 )
                 if conversations:
@@ -169,7 +169,7 @@ class QuestionAgent:
                 self.memory_client.create_event(
                     memory_id=settings.MEMORY_ID,
                     actor_id=req.cognito_id,
-                    session_id=req.chat_result_id,
+                    session_id=str(req.chat_result_id),
                     messages=[
                         (req.chat_history, "USER"),
                         (result["output"], "ASSISTANT")
