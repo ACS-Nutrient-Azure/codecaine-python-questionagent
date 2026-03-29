@@ -6,8 +6,7 @@ class Settings(BaseSettings):
     BEDROCK_MODEL_ID: str = "anthropic.claude-3-5-sonnet-20240620-v1:0"
 
     # Knowledge Base
-    KB_LOCAL_PATH: str = "/app/kb_vector_db"
-    KB_COLLECTION_NAME: str = "lpi_interactions"
+    KB_LOCAL_PATH: str = "/app"
     KB_TOP_K: int = 3
 
     # PostgreSQL

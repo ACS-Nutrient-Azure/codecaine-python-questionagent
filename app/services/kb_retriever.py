@@ -1,39 +1,65 @@
 """
 kb_retriever.py
 
-컨테이너 이미지에 포함된 ChromaDB에서 영양소/의약품 관련 전문 지식을 검색.
+Analysis Agent와 동일한 KB 사용 (numpy + Cohere Bedrock)
 
-- KB 데이터: analysisagent의 lpi_vector_db를 그대로 복사한 kb_vector_db/
-- 임베딩 모델: ChromaDB 기본 임베딩 (원본 DB와 동일)
-- 컨테이너 내 _collection 캐싱으로 요청마다 재로드하지 않음
+KB 파일:
+  kb.npz        — 정규화된 임베딩 벡터 (252, 1536) float32
+  kb_texts.json — 문서 텍스트 + 메타데이터
+
+벡터 검색: numpy cosine similarity (브루트포스)
+임베딩 모델: cohere.embed-multilingual-v3 (AWS Bedrock, 1024차원)
 """
+import json
 import logging
 
-import chromadb
+import boto3
+import numpy as np
 
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# 모듈 레벨 캐시 — 컨테이너 재시작 전까지 유지
-_collection = None
+_COHERE_MODEL_ID = "cohere.embed-multilingual-v3"
 
 
-def _get_collection():
-    """ChromaDB collection을 최초 1회만 로드하고 이후 캐시 반환."""
-    global _collection
-    if _collection is not None:
-        return _collection
-    
-    from chromadb.utils.embedding_functions import OpenAIEmbeddingFunction
-    embedding_fn = OpenAIEmbeddingFunction(
-        api_key=settings.OPENAI_API_KEY,
-        model_name="text-embedding-ada-002",
+def _embed_query(text: str) -> np.ndarray:
+    """Cohere Bedrock으로 쿼리 임베딩 후 정규화된 벡터 반환."""
+    client = boto3.client("bedrock-runtime", region_name=settings.AWS_REGION)
+    response = client.invoke_model(
+        modelId=_COHERE_MODEL_ID,
+        body=json.dumps({
+            "texts": [text],
+            "input_type": "search_query",
+            "embedding_types": ["float"],
+        }),
+        contentType="application/json",
+        accept="application/json",
     )
-    client = chromadb.PersistentClient(path=settings.KB_LOCAL_PATH)
-    _collection = client.get_collection(name=settings.KB_COLLECTION_NAME, embedding_function=embedding_fn)
-    logger.info(f"[KB] collection 로드 완료 — {_collection.count()}개 청크")
-    return _collection
+    result = json.loads(response["body"].read())
+    vec = np.array(result["embeddings"]["float"][0], dtype=np.float32)
+    return vec / np.linalg.norm(vec)
+
+
+# 컨테이너 내 캐싱
+_vectors = None
+_texts = None
+
+
+def _get_kb():
+    global _vectors, _texts
+    if _vectors is not None:
+        return _vectors, _texts
+
+    vectors_path = f"{settings.KB_LOCAL_PATH}/kb.npz"
+    texts_path = f"{settings.KB_LOCAL_PATH}/kb_texts.json"
+
+    _vectors = np.load(vectors_path)["vectors"]
+    with open(texts_path, encoding="utf-8") as f:
+        _texts = json.load(f)
+
+    logger.info(f"[KB] 로드 완료 — {_vectors.shape[0]}개 청크, {_vectors.shape[1]}차원")
+    return _vectors, _texts
 
 
 def retrieve(query: str) -> str:
@@ -42,10 +68,22 @@ def retrieve(query: str) -> str:
     검색 실패 시 빈 문자열 반환 (에이전트가 다른 tool로 fallback 가능하도록).
     """
     try:
-        collection = _get_collection()
-        results = collection.query(query_texts=[query], n_results=settings.KB_TOP_K)
-        docs = results.get("documents", [[]])[0]
-        return "\n\n".join(docs) if docs else ""
+        vectors, texts = _get_kb()
+        query_vec = _embed_query(query)
+
+        # cosine similarity
+        similarities = vectors @ query_vec
+        top_indices = np.argsort(similarities)[::-1][:settings.KB_TOP_K]
+
+        docs = [texts["documents"][i] for i in top_indices]
+        if not docs:
+            logger.info(f"[KB] 검색 결과 없음: {query}")
+            return ""
+
+        context = "\n\n".join(docs)
+        logger.info(f"[KB] {len(docs)}개 청크 검색됨 (query: {query[:50]})")
+        return context
+
     except Exception as e:
         logger.warning(f"[KB] 검색 실패: {e}")
         return ""
