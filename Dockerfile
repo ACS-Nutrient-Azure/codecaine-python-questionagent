@@ -14,7 +14,8 @@ WORKDIR /app
 COPY --from=builder /root/.local /root/.local
 
 COPY app/ ./app/
-COPY kb_vector_db/ ./kb_vector_db/
+COPY kb.npz ./kb.npz
+COPY kb_texts.json ./kb_texts.json
 
 ENV PATH=/root/.local/bin:$PATH
 
