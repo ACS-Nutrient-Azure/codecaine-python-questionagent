@@ -19,12 +19,6 @@ LangChain AgentExecutor 기반 Question Agent 핵심 로직.
 import json
 import logging
 
-import boto3
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain.tools import Tool
-from langchain_aws import ChatBedrock
-from langchain_core.prompts import ChatPromptTemplate
-
 from app.core.config import settings
 from app.schemas.agent import QuestionRequest, QuestionResponse
 from app.services import db_tools, kb_retriever
@@ -46,7 +40,9 @@ SYSTEM_PROMPT = """당신은 영양제 및 건강 관련 질문에 답변하는 
 
 class QuestionAgent:
     def __init__(self):
-        # 로컬 테스트 모드: OpenAI 사용
+        import boto3
+        from langchain_aws import ChatBedrock
+
         if settings.USE_LOCAL_TEST:
             from langchain_openai import ChatOpenAI
             self.llm = ChatOpenAI(
@@ -54,34 +50,28 @@ class QuestionAgent:
                 api_key=settings.OPENAI_API_KEY,
                 temperature=0.7,
             )
-            # Gemini 사용 시 아래로 교체
-            # from langchain_google_genai import ChatGoogleGenerativeAI
-            # self.llm = ChatGoogleGenerativeAI(
-            #     model=settings.GEMINI_MODEL_ID,
-            #     google_api_key=settings.GEMINI_API_KEY,
-            #     temperature=0.7,
-            # )
-        # 실제 배포: Bedrock 사용
         else:
             session = boto3.Session(region_name=settings.AWS_REGION)
             self.llm = ChatBedrock(
                 client=session.client("bedrock-runtime"),
                 model_id=settings.BEDROCK_MODEL_ID,
             )
-        
-        # AgentCore Memory 초기화
+
         self.memory_client = None
         if settings.USE_MEMORY:
-            from bedrock_agentcore.memory import MemoryClient
-            self.memory_client = MemoryClient(region_name=settings.AWS_REGION)
+            try:
+                from bedrock_agentcore.memory import MemoryClient
+                self.memory_client = MemoryClient(region_name=settings.AWS_REGION)
+                logger.info("[QuestionAgent] MemoryClient initialized.")
+            except ModuleNotFoundError:
+                logger.warning("[QuestionAgent] bedrock_agentcore.memory not available, memory disabled.")
+            except Exception as e:
+                logger.error(f"[QuestionAgent] MemoryClient init failed, memory disabled: {e}", exc_info=True)
 
-    def _build_tools(self, cognito_id: str) -> list[Tool]:
-        """
-        요청별로 tool 목록을 생성.
-        cognito_id를 클로저로 캡처해 DB tool이 해당 사용자 데이터만 조회하도록 함.
-        """
+    def _build_tools(self, cognito_id: str) -> list:
+        from langchain.tools import StructuredTool
         from duckduckgo_search import DDGS
-        
+
         def search_web_ddg(query: str) -> str:
             try:
                 results = DDGS().text(query, max_results=3)
@@ -89,42 +79,47 @@ class QuestionAgent:
             except Exception as e:
                 return f"검색 실패: {str(e)}"
 
+        async def _get_user_data(query: str = "") -> str:
+            return await db_tools.get_user_data(cognito_id)
+
+        async def _get_supplements(query: str = "") -> str:
+            return await db_tools.get_supplements(cognito_id)
+
+        async def _get_analysis_result(query: str = "") -> str:
+            return await db_tools.get_analysis_result(cognito_id)
+
         return [
-            Tool(
+            StructuredTool.from_function(
                 name="search_knowledge_base",
                 func=kb_retriever.retrieve,
                 description="영양소, 의약품 상호작용 등 전문 지식을 Knowledge Base에서 검색합니다. 입력: 검색 쿼리 문자열",
             ),
-            Tool(
+            StructuredTool.from_function(
                 name="search_web",
                 func=search_web_ddg,
                 description="최신 건강 정보나 일반 지식을 웹에서 검색합니다. 입력: 검색 쿼리 문자열",
             ),
-            Tool(
+            StructuredTool.from_function(
                 name="get_user_data",
-                func=lambda _: "데이터 없음",
-                coroutine=lambda _: db_tools.get_user_data(cognito_id),
+                coroutine=_get_user_data,
                 description="사용자의 기본 신체 정보(키, 몸무게, 알레르기, 만성질환 등)를 조회합니다. 입력: 무시됨",
             ),
-            Tool(
+            StructuredTool.from_function(
                 name="get_supplements",
-                func=lambda _: "데이터 없음",
-                coroutine=lambda _: db_tools.get_supplements(cognito_id),
+                coroutine=_get_supplements,
                 description="사용자가 현재 복용 중인 영양제 목록과 성분을 조회합니다. 입력: 무시됨",
             ),
-            Tool(
+            StructuredTool.from_function(
                 name="get_analysis_result",
-                func=lambda _: "데이터 없음",
-                coroutine=lambda _: db_tools.get_analysis_result(cognito_id),
+                coroutine=_get_analysis_result,
                 description="사용자의 영양소 분석 결과, 영양소 갭, 추천 영양제를 조회합니다. 입력: 무시됨",
             ),
         ]
 
     async def run(self, req: QuestionRequest) -> QuestionResponse:
-        """
-        AgentExecutor를 실행해 질문에 답변.
-        LLM이 필요한 tool을 스스로 선택하고 최대 5번 반복 실행.
-        """
+        from langchain.agents import AgentExecutor, create_tool_calling_agent
+        from langchain_core.prompts import ChatPromptTemplate
+
         print(f"\n[QUESTION AGENT] Received request from {req.cognito_id}")
         print(f"  - chat_history: {req.chat_history[:100]}...")
         
@@ -132,12 +127,13 @@ class QuestionAgent:
         memory_context = ""
         if self.memory_client and settings.MEMORY_ID:
             try:
-                conversations = self.memory_client.list_events(
-                    memory_id=settings.MEMORY_ID,
-                    actor_id=req.cognito_id,
-                    session_id=str(req.chat_result_id),
-                    max_results=10
+                resp = self.memory_client.list_events(
+                    memoryId=settings.MEMORY_ID,
+                    actorId=req.cognito_id,
+                    sessionId=str(req.chat_result_id),
+                    maxResults=10
                 )
+                conversations = resp.get("events", [])
                 if conversations:
                     memory_context = "\n\n[이전 대화 맥락]\n" + self._format_memory(conversations)
                     print(f"[QUESTION AGENT] Loaded {len(conversations)} previous messages from memory")
@@ -160,28 +156,37 @@ class QuestionAgent:
         result = await executor.ainvoke({"input": user_input})
 
         sources_used = self._extract_sources(result)
-        print(f"[QUESTION AGENT] Answer: {result['output'][:100]}...")
+
+        # langchain 0.3.x에서 output이 content block 리스트로 올 수 있음
+        output = result["output"]
+        if isinstance(output, list):
+            output = " ".join(
+                block.get("text", "") for block in output
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+
+        print(f"[QUESTION AGENT] Answer: {str(output)[:100]}...")
         print(f"[QUESTION AGENT] Sources used: {sources_used}")
         
         # 2. 대화를 AgentCore Memory에 저장
         if self.memory_client and settings.MEMORY_ID:
             try:
                 self.memory_client.create_event(
-                    memory_id=settings.MEMORY_ID,
-                    actor_id=req.cognito_id,
-                    session_id=str(req.chat_result_id),
+                    memoryId=settings.MEMORY_ID,
+                    actorId=req.cognito_id,
+                    sessionId=str(req.chat_result_id),
                     messages=[
-                        (req.chat_history, "USER"),
-                        (result["output"], "ASSISTANT")
+                        {"role": "USER", "content": req.chat_history},
+                        {"role": "ASSISTANT", "content": output}
                     ]
                 )
                 print(f"[QUESTION AGENT] Saved conversation to memory")
             except Exception as e:
                 print(f"[QUESTION AGENT] Memory save failed: {e}")
-        
+
         return QuestionResponse(
             cognito_id=req.cognito_id,
-            answer=result["output"],
+            answer=output,
             sources_used=sources_used,
         )
 
@@ -190,11 +195,13 @@ class QuestionAgent:
         lines = []
         for conv in conversations:
             messages = conv.get("messages", [])
-            for msg, role in messages:
+            for msg in messages:
+                role = msg.get("role", "")
+                content = msg.get("content", "")
                 if role == "USER":
-                    lines.append(f"사용자: {msg}")
+                    lines.append(f"사용자: {content}")
                 elif role == "ASSISTANT":
-                    lines.append(f"AI: {msg}")
+                    lines.append(f"AI: {content}")
         return "\n".join(lines[-20:])  # 최근 20개만
 
     def _build_input(self, req: QuestionRequest) -> str:

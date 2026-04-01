@@ -5,7 +5,8 @@ RUN apt-get update && apt-get install -y gcc g++ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir --user -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --user -r requirements.txt
 
 # 실행 스테이지 (컴파일러 없음)
 FROM --platform=linux/arm64 python:3.12-slim
