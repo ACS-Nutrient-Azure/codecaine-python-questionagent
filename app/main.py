@@ -18,7 +18,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-setup_xray("cdci-prd-question-agent")
+try:
+    setup_xray("cdci-prd-question-agent")
+except Exception as e:
+    logging.getLogger(__name__).warning("X-Ray setup failed (non-fatal): %s", e)
 
 
 @asynccontextmanager
