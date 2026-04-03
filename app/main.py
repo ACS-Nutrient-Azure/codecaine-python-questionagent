@@ -4,8 +4,11 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from aws_xray_sdk.core import xray_recorder
+from aws_xray_sdk.ext.fastapi.middleware import XRayMiddleware
 
 from app.api.routes import invocations
+from app.telemetry import setup_xray
 from app.services import kb_retriever
 from app.services.question_agent import QuestionAgent
 
@@ -14,6 +17,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+setup_xray("cdci-prd-question-agent")
 
 
 @asynccontextmanager
@@ -45,6 +50,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Question Agent", version="1.0.0", lifespan=lifespan)
+app.add_middleware(XRayMiddleware, recorder=xray_recorder)
 app.include_router(invocations.router)
 
 

@@ -13,3 +13,4 @@ duckduckgo-search==7.5.3
 httpx==0.28.1
 python-dotenv==1.0.1
 bedrock-agentcore==0.1.7
+aws-xray-sdk==2.14.0
